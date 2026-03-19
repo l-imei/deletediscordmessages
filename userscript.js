@@ -2,7 +2,7 @@
 // @name          Discord Mass Deleter
 // @description   Extends the discord interface so you can mass delete messages from discord. Improved all aspects such as timing, backoffs, bugs, etc. Original created by victornpb.
 // @namespace     https://github.com/gen3vra/deletediscordmessages
-// @version       1.3.0
+// @version       1.4
 // @match         https://discord.com/*
 // @grant         none
 // @license       MIT
@@ -26,18 +26,13 @@
  */
 async function deleteMessages(authToken, authorId, guildId, channelId, minId, maxId, content, hasLink, hasFile, includeNsfw, includePinned, extLogger, stopHndl, onProgress) {
     const start = new Date();
-    // keep track of channels (threads) that have been archived so we stop
-    // attempting further deletes against them; the search API may still
-    // return hits for messages in an archived thread, but every delete will
-    // fail and we risk infinite retry loops or excessive rate-limiting.
     const ArchivedThreads = new Set();
     let deleteDefault = Math.floor(Math.random() * (2000 - 1000 + 1) + 1000);
     let deleteDelay = deleteDefault;
     let randomizeDelay = true;
     let searchDelay = Math.floor(Math.random() * (2000 - 1000 + 1) + 1000);
     let delCount = 0;
-    let skipCount = 0;            // messages we could not delete (system/archive)
-    let archivedSkipCount = 0;    // subset of skipCount belonging to archived threads
+    let archivedSkipCount = 0;
     let failCount = 0;
     let avgPing;
     let lastPing;
@@ -47,13 +42,12 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
     let offset = 0;
     let iterations = -1;
     let ended = false;
-
     let failInRow = 0;
     let successInRow = 0;
 
     const wait = async ms => new Promise(done => setTimeout(done, ms));
     const msToHMS = s => `${s / 3.6e6 | 0}h ${(s % 3.6e6) / 6e4 | 0}m ${(s % 6e4) / 1000 | 0}s`;
-    const escapeHTML = html => html.replace(/[&<"']/g, m => ({ '&': '&amp;', '<': '&lt;', '"': '&quot;', '\'': '&#039;' })[m]);
+    const escapeHTML = html => html.replace(/[&<"']/g, m => ({'&': '&amp;', '<': '&lt;', '"': '&quot;', '\'': '&#039;'})[m]);
     const redact = str => `<span class="priv">${escapeHTML(str)}</span><span class="mask">REDACTED</span>`;
     const queryString = params => params.filter(p => p[1] !== undefined).map(p => p[0] + '=' + encodeURIComponent(p[1])).join('&');
     const ask = async msg => new Promise(resolve => setTimeout(() => resolve(window.confirm(msg)), 10));
@@ -61,12 +55,12 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
     const toSnowflake = (date) => /:/.test(date) ? ((new Date(date).getTime() - 1420070400000) * Math.pow(2, 22)) : date;
 
     const log = {
-        debug() { extLogger ? extLogger('debug', arguments) : console.debug.apply(console, arguments); },
-        info() { extLogger ? extLogger('info', arguments) : console.info.apply(console, arguments); },
-        verb() { extLogger ? extLogger('verb', arguments) : console.log.apply(console, arguments); },
-        warn() { extLogger ? extLogger('warn', arguments) : console.warn.apply(console, arguments); },
-        error() { extLogger ? extLogger('error', arguments) : console.error.apply(console, arguments); },
-        success() { extLogger ? extLogger('success', arguments) : console.info.apply(console, arguments); },
+        debug() {extLogger ? extLogger('debug', arguments) : console.debug.apply(console, arguments);},
+        info() {extLogger ? extLogger('info', arguments) : console.info.apply(console, arguments);},
+        verb() {extLogger ? extLogger('verb', arguments) : console.log.apply(console, arguments);},
+        warn() {extLogger ? extLogger('warn', arguments) : console.warn.apply(console, arguments);},
+        error() {extLogger ? extLogger('error', arguments) : console.error.apply(console, arguments);},
+        success() {extLogger ? extLogger('success', arguments) : console.info.apply(console, arguments);},
     };
 
     async function recurse() {
@@ -97,14 +91,14 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
                 ['has', hasFile ? 'file' : undefined],
                 ['content', content || undefined],
                 ['include_nsfw', includeNsfw ? true : undefined],
-            ]), { headers });
+            ]), {headers});
             lastPing = (Date.now() - s);
             avgPing = avgPing > 0 ? (avgPing * 0.9) + (lastPing * 0.1) : lastPing;
         } catch (err) {
             return log.error('Search request threw an error:', err);
         }
 
-        // not indexed yet
+        // Not indexed yet
         if (resp.status === 202) {
             const w = (await resp.json()).retry_after;
             throttledCount++;
@@ -115,7 +109,7 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
         }
 
         if (!resp.ok) {
-            // searching messages too fast
+            // Searching messages too fast
             if (resp.status === 429) {
                 const w = (await resp.json()).retry_after;
                 throttledCount++;
@@ -137,11 +131,11 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
         const total = data.total_results;
         if (!grandTotal) grandTotal = total;
         const discoveredMessages = data.messages.map(convo => convo.find(message => message.hit === true));
-        // Filter out system messages and optionally pinned ones
+        // filter out system messages and optionally pinned ones
         let messagesToDelete = discoveredMessages.filter(msg => {
             return msg.type === 0 || msg.type === 6 || (msg.pinned && includePinned);
         });
-        // remove any messages belonging to threads we've already marked archived
+        // skip message if in archived thread
         messagesToDelete = messagesToDelete.filter(msg => {
             if (ArchivedThreads.has(msg.channel_id)) {
                 log.verb(`Skipping message in archived thread ${msg.channel_id}`);
@@ -150,14 +144,14 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
             return true;
         });
         const skippedMessages = discoveredMessages.filter(msg => !messagesToDelete.find(m => m.id === msg.id));
-        // update global counters
-        skipCount += skippedMessages.length;
+        // count skipped messages as not deleted
+        failCount += skippedMessages.length;
         const archivedCount = skippedMessages.filter(msg => ArchivedThreads.has(msg.channel_id)).length;
         const systemCount = skippedMessages.length - archivedCount;
         archivedSkipCount += archivedCount;
         // signal progress UI that undeletable messages were found
         if (skippedMessages.length > 0) {
-            try { if (onProgress) onProgress(delCount, grandTotal || 1, true); } catch (e) { }
+            try {if (onProgress) onProgress(delCount, grandTotal || 1, true);} catch (e) { }
         }
 
         const end = () => {
@@ -167,15 +161,11 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
             // unnecessary
             // printDelayStats();
             log.verb(`Rate Limited: ${throttledCount} times. Total time throttled: ${msToHMS(throttledTotalTime)}.`);
-            const computedSkip = grandTotal - delCount - failCount;
-            // archivedSkipCount retained for diagnostics, but not shown to user
-            log.debug(`Deleted ${delCount} messages, ${failCount} failed, ${computedSkip} skipped.\n`);
-            // update UI to show final deleted count vs deletable messages
-            // do not update UI here; the last onProgress from the loop already
-            // reflected the most recent state. calling onProgress at end caused
-            // spurious resets (blue/full) when the run ended incomplete.
+            log.debug(`Deleted ${delCount} messages, ${failCount} failed.\n`);
             ended = true;
         }
+
+        const isRunComplete = () => (delCount + failCount) >= grandTotal;
 
         const deletableMessages = grandTotal - archivedSkipCount;
         const etr = msToHMS((searchDelay * Math.round(deletableMessages / 25)) + ((deleteDelay + avgPing) * deletableMessages));
@@ -186,12 +176,11 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
         printDelayStats();
         log.verb(`Estimated time remaining: ${etr}`)
 
-
         if (messagesToDelete.length > 0) {
 
             if (++iterations < 1) {
                 log.verb(`Waiting for your confirmation...`);
-                const previewMessages = messagesToDelete;
+                const previewMessages = messagesToDelete; // [...messagesToDelete].reverse(); (use if you want the preview to match discords ui)
                 if (!await ask(`Do you want to delete ~${total} messages?\nEstimated time: ${etr}\n\n---- Preview ----\n` +
                     previewMessages.map(m => `${m.author.username}#${m.author.discriminator}: ${m.attachments.length ? '[ATTACHMENTS]' : m.content}`).join('\n')))
                     return end(log.error('Aborted by you!'));
@@ -200,7 +189,7 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
 
             for (let i = 0; i < messagesToDelete.length; i++) {
                 const message = messagesToDelete[i];
-                // if we've already marked this thread as archived, skip
+                // if already marked, skip
                 if (ArchivedThreads.has(message.channel_id)) {
                     log.verb(`Skipping message in archived thread ${message.channel_id}`);
                     continue;
@@ -210,11 +199,8 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
                 // Too big to read, too much information to be useful to end user
                 // if you care about individual IDs being deleted or your username, there ya go:
                 //log.debug(`${((delCount + 1) / grandTotal * 100).toFixed(2)}% (${delCount + 1}/${grandTotal})` + `Delete ID:${redact(message.id)} <b>${redact(message.author.username + '#' + message.author.discriminator)} <small>(${redact(new Date(message.timestamp).toLocaleString())})</small>:</b> <i>${redact(message.content).replace(/\n/g, '↵')}</i>`, message.attachments.length ? redact(JSON.stringify(message.attachments)) : '');
-                const processed = delCount + skipCount;
+                const processed = delCount + failCount;
                 log.debug(`${((processed + 1) / grandTotal * 100).toFixed(2)}% (${processed + 1}/${grandTotal})` + ` | <b>DEL</b> <small>(${redact(new Date(message.timestamp).toLocaleDateString() + " - " + new Date(message.timestamp).toLocaleTimeString())})</small>: ${redact(message.content).replace(/\n/g, '↵')}`, message.attachments.length ? redact(JSON.stringify(message.attachments)) : '');
-
-
-                // progress reflects actual deleted messages (and adjusts when archived threads are detected)
 
                 let resp;
                 try {
@@ -227,29 +213,30 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
                     lastPing = (Date.now() - s);
                     avgPing = (avgPing * 0.9) + (lastPing * 0.1);
                 } catch (err) {
-                    log.error('Delete request throwed an error:', err);
-                    log.verb('Related object:', redact(JSON.stringify(message)));
+                    log.error('Delete request throwed an error:', err); // Too long to be read in the console
+                    log.verb('Related object:', redact(JSON.stringify(message))); // Too long to be read in the console
                     failCount++;
+                    if (i < messagesToDelete.length - 1) {
+                        await wait(deleteDelay);
+                    }
+                    continue;
                 }
 
                 if (!resp.ok) {
                     // failed
                     let err;
-                    try { err = await resp.json(); } catch { err = null; }
+                    try {err = await resp.json();} catch {err = null;}
 
                     failInRow++;
                     successInRow = 0;
                     randomizeDelay = false;
 
-                    // thread archived – API can return a few different codes or
-                    // messages depending on context.
+                    // Thread archived or can't be opened due to missing permissions or rate limits (Program can't discern between the two)
                     if ((resp.status === 400 && err?.code === 50083) ||
                         (resp.status === 403 && err?.message && /archiv/i.test(err.message)) ||
                         (resp.status === 404 && err?.message && /archiv/i.test(err.message))) {
                         log.warn(`Archived thread detected (status ${resp.status}${err?.code ? ', code ' + err.code : ''}), marking channel ${message.channel_id} as archived`);
                         ArchivedThreads.add(message.channel_id);
-                        // accounting/offset for this message is handled in the page-level
-                        // skippedMessages block to avoid double counting.
                         continue;
                     }
 
@@ -278,6 +265,7 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
                         await wait(deleteDelay);
                         i--; // retry
                     }
+                    //nonspecific error handler
                     else {
                         log.error(`Error deleting message, API responded with status ${resp.status}!`, err);
                         log.verb('Related object:', redact(JSON.stringify(message)));
@@ -290,7 +278,7 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
                     successInRow++;
                     delCount++;
                     // update progress after a successful delete
-                    try { if (onProgress) onProgress(delCount, grandTotal || 1); } catch (e) { }
+                    try {if (onProgress) onProgress(delCount, grandTotal || 1);} catch (e) { }
                     if (randomizeDelay) {
                         deleteDefault = Math.floor(Math.random() * (2000 - 1000 + 1) + 1000);
                         deleteDelay = deleteDefault;
@@ -308,8 +296,6 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
                     }
                 }
 
-
-                // avoid an unnecessary delay after processing the last message
                 if (i < messagesToDelete.length - 1) {
                     await wait(deleteDelay);
                 }
@@ -321,14 +307,12 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
                 log.verb(`Found ${skippedMessages.length} system messages! Increasing offset to ${offset}.`);
             }
 
-            // All results are already accounted for (deleted/failed/skipped),
-            // no need to issue another search request.
-            if ((delCount + failCount + skipCount) >= grandTotal) {
+            if (isRunComplete()) {
                 return end();
             }
 
             log.verb(`Searching next messages in ${searchDelay}ms...`, (offset ? `(offset: ${offset})` : ''));
-            // rs
+
             deleteDefault = Math.floor(Math.random() * (2000 - 1000 + 1) + 1000);
             deleteDelay = deleteDefault;
             searchDelay = Math.floor(Math.random() * (2000 - 1000 + 1) + 1000);
@@ -342,13 +326,13 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
 
             return await recurse();
         } else {
-            // nothing on this page could be deleted (either system or archived)
+            // Nothing on this page could be deleted (either system or archived)
             if (skippedMessages.length > 0) {
                 const archivedCount = skippedMessages.filter(msg => ArchivedThreads.has(msg.channel_id)).length;
                 const systemCount = skippedMessages.length - archivedCount;
-                log.verb(`No deletable messages on this page (${systemCount} system, ${archivedCount} archived). Advancing offset by ${skippedMessages.length}.`);
+                log.verb(`No deletables on this page (${systemCount} system, ${archivedCount} archived). Advancing offset by ${skippedMessages.length}.`);
                 offset += skippedMessages.length;
-                if ((delCount + failCount + skipCount) >= grandTotal) {
+                if (isRunComplete()) {
                     return end();
                 }
                 if (offset >= total) {
@@ -375,8 +359,7 @@ async function deleteMessages(authToken, authorId, guildId, channelId, minId, ma
     log.success(`\nStarted at ${start.toLocaleString()}`);
     log.debug(`authorId="${redact(authorId)}" guildId="${redact(guildId)}" channelId="${redact(channelId)}" minId="${redact(minId)}" maxId="${redact(maxId)}" hasLink=${!!hasLink} hasFile=${!!hasFile}`);
     ended = false;
-    // initialize progress at 0 so percent shows and color is blue immediately
-    try { if (onProgress) onProgress(0, 1); } catch (e) { }
+    try {if (onProgress) onProgress(0, 1);} catch (e) { }
     return await recurse();
 }
 
@@ -386,7 +369,7 @@ let popover;
 let btn;
 let stop;
 let logArea;
-let version = "1.2.1";
+let version = "1.4";
 
 function initUI() {
 
@@ -548,7 +531,7 @@ function initUI() {
     const observer = new MutationObserver(function (_mutationsList, _observer) {
         if (!document.body.contains(btn)) mountBtn(); // re-mount the button to the toolbar
     });
-    observer.observe(document.body, { attributes: false, childList: true, subtree: true });
+    observer.observe(document.body, {attributes: false, childList: true, subtree: true});
 
     mountBtn();
 
@@ -704,7 +687,7 @@ function initUI() {
     };
 
     const logger = (type = '', args) => {
-        const style = { '': '', info: 'color:#00b0f4;', verb: 'color:#72767d;', warn: 'color:#faa61a;', error: 'color:#f04747;', success: 'color:#43b581;' }[type];
+        const style = {'': '', info: 'color:#00b0f4;', verb: 'color:#72767d;', warn: 'color:#faa61a;', error: 'color:#f04747;', success: 'color:#43b581;'}[type];
         logArea.insertAdjacentHTML('beforeend', `<div style="${style}">${Array.from(args).map(o => typeof o === 'object' ? JSON.stringify(o, o instanceof Error && Object.getOwnPropertyNames(o)) : o).join('\t')}</div>`);
         if (autoScroll.checked) logArea.querySelector('div:last-child').scrollIntoView(false);
     };
